@@ -4,11 +4,11 @@ import re
 from collections import Counter
 import plotly.express as px
 import pandas as pd
+from datetime import datetime, date
 
 st.set_page_config(page_title="송탄고 가장 많이 나온 반찬 TOP 5", layout="wide")
 
 st.title("🍱 송탄고등학교 - 가장 많이 나온 반찬 TOP 5")
-st.caption("기간: 2025년 9월 ~ 2026년 9월 (중식 기준)")
 
 # Streamlit Secrets에서 NEIS API 키 불러오기
 api_key = st.secrets.get("NEIS_API_KEY")
@@ -17,14 +17,36 @@ if not api_key:
     st.error("Streamlit Secrets에 'NEIS_API_KEY'가 설정되어 있지 않습니다.")
     st.stop()
 
+# 사이드바에서 날짜 범위 입력받기
+st.sidebar.header("📅 조회 기간 설정")
+default_start = date(2025, 9, 1)
+default_end = date(2026, 9, 30)
+
+date_range = st.sidebar.date_input(
+    "조회할 기간을 선택하세요",
+    value=(default_start, default_end),
+    min_value=date(2020, 1, 1),
+    max_value=date(2030, 12, 31)
+)
+
+# 날짜가 범위로 올바르게 선택되었는지 확인
+if isinstance(date_range, tuple) and len(date_range) == 2:
+    start_date_obj, end_date_obj = date_range
+else:
+    st.info("사이드바에서 시작일과 종료일을 모두 선택해 주세요.")
+    st.stop()
+
+start_ymd = start_date_obj.strftime("%Y%m%d")
+end_ymd = end_date_obj.strftime("%Y%m%d")
+
+st.caption(f"조회 기간: **{start_date_obj.strftime('%Y년 %m월 %d일')} ~ {end_date_obj.strftime('%Y년 %m월 %d일')}** (중식 기준)")
+
 # 송탄고등학교 기본 정보 (경기도교육청: J10, 행정표준코드: 7530188)
 ATPT_OFCDC_SC_CODE = "J10"
 SD_SCHUL_CODE = "7530188"
-START_DATE = "20250901"
-END_DATE = "20260930"
 
 @st.cache_data(ttl=3600)
-def fetch_all_meal_data():
+def fetch_all_meal_data(api_key, start_date, end_date):
     url = "https://open.neis.go.kr/hub/mealServiceDietInfo"
     pIndex = 1
     pSize = 100
@@ -39,8 +61,8 @@ def fetch_all_meal_data():
             "ATPT_OFCDC_SC_CODE": ATPT_OFCDC_SC_CODE,
             "SD_SCHUL_CODE": SD_SCHUL_CODE,
             "MMEAL_SC_CODE": "2",  # 중식
-            "MLSV_FROM_YMD": START_DATE,
-            "MLSV_TO_YMD": END_DATE,
+            "MLSV_FROM_YMD": start_date,
+            "MLSV_TO_YMD": end_date,
         }
 
         try:
@@ -67,32 +89,30 @@ def fetch_all_meal_data():
     return all_rows
 
 with st.spinner("NEIS API에서 급식 데이터를 불러오는 중입니다..."):
-    meal_data = fetch_all_meal_data()
+    meal_data = fetch_all_meal_data(api_key, start_ymd, end_ymd)
 
 if not meal_data:
-    st.warning("조회된 급식 데이터가 없습니다.")
+    st.warning("선택하신 기간에 조회된 급식 데이터가 없습니다. 사이드바에서 다른 기간을 선택해 보세요.")
 else:
     # 날짜별 메뉴 중복 제거 처리 (같은 날 동일 메뉴 중복 카운트 방지)
-    # {메뉴명: set(제공된 날짜들)}
     menu_dates = {}
     total_days = len({row["MLSV_YMD"] for row in meal_data})
 
     for row in meal_data:
-        date = row["MLSV_YMD"]
+        date_str = row["MLSV_YMD"]
         dish_string = row.get("DDISH_NM", "")
 
         # <br/> 기준 분리 및 알레르기 정보/특수문자 제거
         dishes = dish_string.split("<br/>")
         for dish in dishes:
-            # 괄호 속 알레르기 번호 및 기타 표시 제거 (예: "쌀밥(5.6.13.)" -> "쌀밥")
+            # 괄호 속 알레르기 번호 및 기타 표시 제거
             cleaned_dish = re.sub(r"\([^)]*\)", "", dish).strip()
-            # 기타 무의미한 공백 및 특수문자 정돈
             cleaned_dish = re.sub(r"[^\w\s가-힣]", "", cleaned_dish).strip()
 
             if cleaned_dish:
                 if cleaned_dish not in menu_dates:
                     menu_dates[cleaned_dish] = set()
-                menu_dates[cleaned_dish].add(date)
+                menu_dates[cleaned_dish].add(date_str)
 
     # 메뉴별 등장 일수 계산
     menu_counts = Counter({dish: len(dates) for dish, dates in menu_dates.items()})
@@ -105,7 +125,6 @@ else:
         df_top5["비율(%)"] = ((df_top5["출석일수"] / total_days) * 100).round(1)
 
         # 파이 차트 시각화 (Plotly)
-        # 내림차순 정렬 및 시계방향 배치, 값 크기 비례 단색(파란색 계열) 그라데이션
         fig = px.pie(
             df_top5,
             names="메뉴",
@@ -119,8 +138,8 @@ else:
         fig.update_traces(
             textinfo="label+value",
             hovertemplate="<b>%{label}</b><br>제공 일수: %{value}일<br>제공 비율: %{customdata[0]}%",
-            sort=False,  # 정렬을 유지하여 내림차순 순서 보장
-            direction="clockwise"  # 시계 방향 순서 지정
+            sort=False,  # 내림차순 순서 유지
+            direction="clockwise"  # 시계 방향 배치
         )
 
         fig.update_layout(
@@ -129,7 +148,7 @@ else:
             margin=dict(t=60, b=30, l=30, r=30)
         )
 
-        # 주요 지표 표시
+        # 주요 지표 및 차트 표시
         col1, col2 = st.columns([1, 2])
         
         with col1:
